@@ -1,58 +1,70 @@
-name: Build and deploy Docker app to Lightsail
+name: CI CD
 
 on:
   push:
-    branches:
-      - main # 배포 트리거 대상 브랜치 on.push.branch -> 해당 브랜치가 푸시될 때 트리깅
+    branches: ['main']
+  pull_request:
+    branches: ['main']
 
 env:
-  AWS_REGION: ap-northeast-2 
-  AWS_LIGHTSAIL_SERVICE_NAME: amazon-lightsail-container-example # 실제 lightsail에 올라갈 이미지 명
-
+  LIGHTSAIL_SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+  LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+  LIGHTSAIL_USERNAME: bitnami
+  AWS_REGION: ap-northeast-2
 jobs:
-  deploy:
-    name: Build and deploy
+  build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ligthsail-example # github project내에 배포할 대상 프로젝트 디렉토리
+
     steps:
-      - name: Checkout # 해당 working-directory checkout (트리깅 브랜치 최신버전)
+
+      # 브런치로 체크아웃
+      - name: 해당 브런치로 체크아웃
         uses: actions/checkout@v2
-        
-      - name: Install Utilities # 필수 유틸리티 다운로드 
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq unzip
 
-      - name: Install AWS Client # AWS SDK 다운로드 (LightSail 이미지 푸시 및 배포를 위함)
-        run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install || true
-          aws --version
-          curl "https://s3.us-west-2.amazonaws.com/lightsailctl/latest/linux-amd64/lightsailctl" -o "lightsailctl"
-          sudo mv "lightsailctl" "/usr/local/bin/lightsailctl"
-          sudo chmod +x /usr/local/bin/lightsailctl
+      # nodeJs를 설치합니다.
+      - name: 노드 설치
+        uses: actions/setup-node@v1
+        with:
+          node-version: 14
 
-      - name: Configure AWS credentials # 입력된 IAM 사용자 액세스키 & 시크릿키 검증
+      # package.json의 dependencies 설치
+      - name: 프로젝트 디펜던시 설치
+        run: yarn
+
+      # 프로젝트를 빌드합니다.
+      - name: 프로젝트 빌드하기
+        run: yarn build
+
+      # 빌드 파일이 생성되었는지 확인합니다.
+      - name: 빌드 파일 생성 체크
+        run: ls -la
+      # AWS 인증을 시작합니다.
+      - name: AWS 인증하기
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-region: ${{ env.AWS_REGION }}
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - name: Build Docker Image # Docker Buildkit 빌드
-        run: DOCKER_BUILDKIT=1 docker build -t ${{ env.AWS_LIGHTSAIL_SERVICE_NAME }}:release .
+      # AWS 인증이 완료되었는지 테스트합니다.
+      - name: AWS Lightsail에 연결되었는지 확인
+        run: aws configure list
 
-      - name: Push and Deploy # 이미지 푸시 및 배포
-        run: |
-          service_name=${{ env.AWS_LIGHTSAIL_SERVICE_NAME }}
-          aws lightsail push-container-image \
-            --region ${{ env.AWS_REGION }} \
-            --service-name ${service_name} \
-            --label ${service_name} \
-            --image ${service_name}:release
-          aws lightsail get-container-images --service-name ${service_name} | jq --raw-output ".containerImages[0].image" > image.txt
-          jq --arg image $(cat image.txt) '.containers.app.image = $image' container.template.json > container.json
-          aws lightsail create-container-service-deployment --service-name ${service_name} --cli-input-json file://$(pwd)/container.json
+      # 배포 자동화를 시작합니다.
+      - name: 배포 자동화
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{env.LIGHTSAIL_USERNAME}}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          source: 'dist/*'
+          strip_components: 1
+          target: '/home/bitnami/{project-name}/dist'
+
+      - name: Restart PM2 process
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{env.LIGHTSAIL_USERNAME}}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          script: pm2 restart app
