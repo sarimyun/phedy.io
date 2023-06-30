@@ -21,20 +21,42 @@ jobs:
 
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - name: checkout release
+      - name: 해당 브런치로 체크아웃
         uses: actions/checkout@v3
+      
+      - name: 노드 설치
+        uses: actions/setup-node@v1
+        with:
+          node-version: 14
+          
+      # package.json의 dependencies 설치
+      - name: 프로젝트 디펜던시 설치
+        run: yarn
+        
+      # 프로젝트를 빌드합니다.
+      - name: 프로젝트 빌드하기
+        run: yarn build
+        
+      # 빌드 파일이 생성되었는지 확인합니다.
+      - name: 빌드 파일 생성 체크
+        run: ls -la
 
       - name: compress
         run: tar cvfz ./$GITHUB_SHA.tar.gz *
         shell: bash
 
-      - name: AWS configure credentials
+      # AWS 인증을 시작합니다.
+      - name: AWS 인증하기
         uses: aws-actions/configure-aws-credentials@v1
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
-          aws-region: ap-northeast-2
-
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          
+      # AWS 인증이 완료되었는지 테스트합니다.
+      - name: AWS Lightsail에 연결되었는지 확인
+        run: aws configure list
+        
       - name: upload to S3
         run: aws s3 cp --region ap-northeast-2 ./$GITHUB_SHA.tar.gz s3://[phedy-codedeploy-bucket]
 
@@ -44,3 +66,22 @@ jobs:
           --deployment-config-name CodeDeployDefault.OneAtATime
           --deployment-group-name [phedy-codedeploy-group]
           --s3-location bucket=phedy-codedeploy-bucket,bundleType=tgz,key=$GITHUB_SHA.tar.gz
+
+      # 배포 자동화를 시작합니다.
+      - name: 배포 자동화
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{env.LIGHTSAIL_USERNAME}}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          source: 'dist/*'
+          strip_components: 1
+          target: '/home/bitnami/{project-name}/dist'
+          
+      - name: Restart PM2 process
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{env.LIGHTSAIL_USERNAME}}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          script: pm2 restart app
